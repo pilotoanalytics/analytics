@@ -1,0 +1,245 @@
+
+#include <NewPing.h>
+#include <avr-libc.h>
+
+#include <SPI.h>
+#include <Ethernet.h>
+
+enum estado_nome {ENTRANDO,DENTRO,SAINDO,FORA};
+
+#define DISTANCIA 10 //cm
+#define QUANTIDADE 30
+#define TRIGGER_PIN  12  // Arduino pin tied to trigger pin on the ultrasonic sensor.
+#define ECHO_PIN     13  // Arduino pin tied to echo pin on the ultrasonic sensor.
+#define MAX_DISTANCE 200 // Maximum distance we want to ping for (in centimeters). Maximum sensor distance is rated at 400-500cm.
+#define USO Uso
+#define TEMPO Tempo
+#define TRACKING_ID "UA-53795055-1" //Your Analytics Property ID
+#define DEVICE_ID  1
+#define PAYLOAD_CATEGORY  "Piloto"
+#define TRACKING_VERSION 1
+#define PAYLOAD_TYPE "event" // Must be one of 'pageview', 'appview', 'event', 'transaction', 'item', 'social', 'exception', 'timing'.
+
+NewPing sonar(TRIGGER_PIN, ECHO_PIN, MAX_DISTANCE); // NewPing setup of pins and maximum distance.
+
+enum estado_nome fsm_estado = ENTRANDO;
+int dist = 0;
+int contador = 0;
+float tempo = 0;//s
+
+typedef struct message {
+  int trackingVersion;
+  String trackingID;
+  int deviceID;
+  String payloadType;
+  String payloadCategory;
+  String payloadAction;
+  String payloadLabel;
+  String data;
+}t_message;
+
+byte mac[]     = {  0xB0, 0xC0, 0xDE, 0xEF, 0xFE, 0xC7 };
+IPAddress server(173,194,40,97);//Google Analytics IP
+EthernetClient puzzleClient;
+IPAddress myIPAddress;
+String uso = "Uso";
+String tempo_String = "Tempo";
+String usar = "Usar";
+String devolver = "Devolver";
+
+void setup() {
+  // initialize serial communication:
+  Serial.begin(9600); 
+  
+  NewPing::timer_ms(1000, increment); // Create a Timer2 interrupt that calls increment in your sketch once every 1000 milliseconds.
+ 
+  Serial.println("Starting...");
+  int ethBegin =  Ethernet.begin(mac); 
+  Serial.print("Begin: ");
+  Serial.print(ethBegin);
+  Serial.print("\tIP: ");
+  Serial.println(myIPAddress);
+
+}
+
+void loop() {
+  
+  struct message m;
+  m = detect();
+  send_tracking_data(m);
+  
+}
+
+struct message detect()
+{
+  struct message m;
+  while(1)
+  {
+    delay(50);                      // Wait 50ms between pings (about 20 pings/sec). 29ms should be the shortest delay between pings.
+    
+    unsigned int uS = sonar.ping(); // Send ping, get ping time in microseconds (uS).
+    dist = uS / US_ROUNDTRIP_CM;
+    
+    switch (fsm_estado) {
+    case ENTRANDO://ENTRANDO 
+      Serial.println("ENTRANDO");
+      if(dist <DISTANCIA)
+      {
+        contador++;
+      }
+      if(contador >QUANTIDADE)
+      {    
+        Serial.print("SEND(TEMPO DE USO): ");
+        tempo = tempo/60;
+        tempo = (int)tempo;
+        
+        m.trackingVersion = TRACKING_VERSION;
+        m.trackingID = TRACKING_ID;
+        m.deviceID = DEVICE_ID;
+        m.payloadCategory = PAYLOAD_CATEGORY;
+        m.payloadAction = devolver;
+        m.payloadLabel = tempo_String;
+        m.data = String((int)tempo);
+        
+        fsm_estado = DENTRO;
+        tempo = 0;
+        
+        return m;    
+      
+   
+      }
+     if(dist >DISTANCIA)
+      {
+        fsm_estado = FORA;
+      } 
+      
+      break;
+    case DENTRO:
+    
+      Serial.println("DENTRO");
+      if(dist > DISTANCIA)
+      {
+        contador = 0;
+        fsm_estado = SAINDO;
+      }
+      break;
+    case SAINDO:
+    
+      Serial.println("SAINDO");
+      if(dist < DISTANCIA)
+      {
+        fsm_estado = DENTRO;
+      }
+      else
+      {
+        contador++;
+      }
+      
+      if(contador > QUANTIDADE)
+      {
+        m.trackingVersion = TRACKING_VERSION;
+        m.trackingID = TRACKING_ID;
+        m.deviceID = DEVICE_ID;
+        m.payloadCategory = PAYLOAD_CATEGORY;
+        m.payloadAction = usar;
+        m.payloadLabel = uso;
+        m.data = String(1);
+        
+        Serial.println("SEND (USO)");
+        fsm_estado = FORA;
+        
+        return m;
+      }
+      
+      break;
+    case FORA:
+      Serial.println("FORA");
+      if(dist < DISTANCIA)
+      {
+        fsm_estado = ENTRANDO;
+        contador = 0;
+      }
+      break;
+    }
+  }
+  
+  return m;
+}
+
+String create_payload(int trackingVersion, String trackingID, int deviceID,String payloadType, String payloadCategory,String payloadAction, String payloadLabel, String data)
+{
+    String payloadData = "v=";
+        payloadData += trackingVersion;
+        payloadData += "&tid=";
+        payloadData += trackingID;
+        payloadData += "&cid=";
+        payloadData += deviceID;
+        payloadData += "&t=";
+        payloadData += payloadType;
+        payloadData += "&ec=";
+        payloadData += payloadCategory;
+        payloadData += "&ea=";
+        payloadData += payloadAction;
+        payloadData += "-";
+        payloadData += deviceID;
+        payloadData += "&el=";
+        payloadData += payloadLabel;
+        payloadData += "&ev=";
+        payloadData += data;
+        Serial.println(payloadData);
+        
+        return payloadData;
+}
+
+void send_tracking_data(struct message m)
+{
+  String payloadData = create_payload(m.trackingVersion, m.trackingID, m.deviceID,m.payloadType, m.payloadCategory, m.payloadAction, m.payloadLabel, m.data);
+  start_connect();
+  if (puzzleClient.connected()) {
+    puzzleClient.println("POST /collect HTTP/1.1");
+    puzzleClient.println("Host: www.google-analytics.com");
+    puzzleClient.print("Content-Length: ");
+    puzzleClient.println(payloadData.length());
+    puzzleClient.println();
+    puzzleClient.print(payloadData);
+    puzzleClient.println();
+    Serial.print("connected: ");
+    Serial.print(puzzleClient.connected());
+    Serial.print("    Avaliable: ");
+    Serial.print(puzzleClient.available());
+    Serial.print("\n");
+  } else {
+    Serial.println("failed.. just skipping a beat for now");
+  }
+}
+
+void start_connect()
+{
+  int retryCount = 100;
+  puzzleClient.flush();
+  while(!puzzleClient.connected() && retryCount > 0) { //limit to a few trys
+    retryCount--;
+    puzzleClient.stop();
+    Serial.println("TRY Connect");
+    puzzleClient.connect(server, 80);
+    delay(500);
+    if(retryCount < 5) { //getting desperate... reset address
+      myIPAddress = Ethernet.localIP(); //renew dynamic address
+      Serial.print("RE-IP: ");
+      Serial.print(myIPAddress);
+      Serial.print("\n");
+    }
+  }
+}
+
+void increment()
+{
+  if(fsm_estado == FORA)
+  {
+    tempo++;
+  }
+}
+
+
+
+
